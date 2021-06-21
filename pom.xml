@@ -10,6 +10,7 @@
     <version>1.0-SNAPSHOT</version>
     <modules>
         <module>01-hello-world</module>
+        <module>02-work-queue</module>
     </modules>
 
 

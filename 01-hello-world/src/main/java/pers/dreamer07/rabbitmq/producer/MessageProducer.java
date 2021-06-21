@@ -1,9 +1,6 @@
 package pers.dreamer07.rabbitmq.producer;
 
-import com.rabbitmq.client.AMQP;
-import com.rabbitmq.client.Channel;
-import com.rabbitmq.client.Connection;
-import com.rabbitmq.client.ConnectionFactory;
+import com.rabbitmq.client.*;
 import sun.security.ssl.HandshakeOutStream;
 
 import java.io.IOException;
@@ -45,7 +42,7 @@ public class MessageProducer {
         *   4. 是否自动删除，最后一个消费者服务器断开连接后，是否自动删除该队列
         *   5. 自动删除
         * */
-        channel.queueDeclare(QUEUE_NAME, false, false, false, null);
+        channel.queueDeclare(QUEUE_NAME, true, false, false, null);
         // 定义消费信息
         String message = "hello world";
         /* 利用信道发送消息
@@ -54,7 +51,7 @@ public class MessageProducer {
         *   3. 其他参数
         *   4. 消息
         * */
-        channel.basicPublish("", QUEUE_NAME, null, message.getBytes());
+        channel.basicPublish("", QUEUE_NAME, MessageProperties.PERSISTENT_TEXT_PLAIN, message.getBytes());
         System.out.println("消息发送完毕");
     }
 

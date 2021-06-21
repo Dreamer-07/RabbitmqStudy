@@ -304,3 +304,267 @@ Message queue，从字面上来看，本质上就是个队列，遵循**先入�
 
 
 
+# 第三章 Work Queue
+
+> 当中间件中突然涌进大量任务(消息)时，为了能够快速的解决任务，就需要多个工作线程(消费者)使用根据一定的分发算法进行对应的任务
+>
+> ![image-20210621084043213](README.assets/image-20210621084043213.png)
+
+## 3.1 轮询分发消息
+
+1. 创建工具类，将与 RabbitMQ 连接部分的代码抽取出来
+
+   ```java
+   public class RabbitmqUtil {
+   
+       // 定义队列名
+       private static final String QUEUE_NAME = "hello";
+       // 定义主机地址
+       private static final String HOST = "192.168.127.139";
+       // 定义连接 RabbitMQ Server 用户名
+       private static final String USER_NAME = "prover";
+       // 定义连接 RabbitMQ Server 密码
+       private static final String PASSWORD = "123456";
+   
+       /**
+        * 返回与 Rabbitmq Server 连接的 Channel 
+        * @return
+        * @throws IOException
+        * @throws TimeoutException
+        */
+       public static Channel getChannel() throws IOException, TimeoutException {
+           // 创建一个连接工厂
+           ConnectionFactory factory = new ConnectionFactory();
+           // 设置主键地址，用户名和免密
+           factory.setHost(HOST);
+           factory.setUsername(USER_NAME);
+           factory.setPassword(PASSWORD);
+           // 创建连接
+           Connection connection = factory.newConnection();
+           // 获取通信(Conn 内部的逻辑连接)
+           return connection.createChannel();
+       }
+   
+   }
+   ```
+
+2. 创建工作线程(消费者)
+
+   ```java
+   /**
+    * @program: RabbitmqStudy
+    * @description: 工作线程(消费者)
+    * @author: EMTKnight
+    * @create: 2021-06-21
+    **/
+   public class MessageWorker {
+   
+       // 定义队列名
+       private static final String QUEUE_NAME = "hello";
+   
+       public static void main(String[] args) throws IOException, TimeoutException {
+           Channel channel = RabbitmqUtil.getChannel();
+           channel.basicConsume(QUEUE_NAME, true,
+                   (consumerTag, message) -> System.out.println(consumerTag + ": 成功接收到消息 - " + new String(message.getBody())),
+                   (consumerTag) -> System.out.println(consumerTag + ": 接收消息的过程中出现错误")
+           );
+       }
+   
+   }
+   ```
+
+   通过 IDEA 开启多个工作线程
+
+   ![image-20210621091127966](README.assets/image-20210621091127966.png)
+
+3. 编写生产者代码
+
+   ```java
+   /**
+    * @program: RabbitmqStudy
+    * @description: 消息生产者
+    * @author: EMTKnight
+    * @create: 2021-06-21
+    **/
+   
+   public class MessageConsumer {
+   
+       // 定义队列名
+       private static final String QUEUE_NAME = "hello";
+   
+       public static void main(String[] args) throws IOException, TimeoutException {
+           // 获取信道
+           Channel channel = RabbitmqUtil.getChannel();
+           // 配置队列
+           channel.queueDeclare(QUEUE_NAME, false, false, false, null);
+           // 从控制台中接收消息
+           Scanner scanner = new Scanner(System.in);
+           while (scanner.hasNext()){
+               // 获取消息
+               String message = scanner.next();
+               // 发送消息
+               channel.basicPublish("", QUEUE_NAME, null, message.getBytes());
+               System.out.println("消息发送成功:" + message);
+           }
+       }
+   
+   }
+   ```
+
+4. 启动，通过在生产者工作台输入消息，两个工作线程实现 **轮询消费**
+
+## 3.2 消息应答
+
+### 概念
+
+默认情况下，rabbitmq 向消费者传递消息后，就会立即将该消息标记为删除。而为了保证消息能够被正常消费，避免由于消费者的宕机，出现异常等导致消息丢失，rabbitmq 引入了消息应答机制
+
+在消费者将消息消费完之后，**告诉 rabbitmq 他已经处理了，此时 rabbitmq 再将该消息删除**
+
+### 自动应答
+
+![image-20210621093420406](README.assets/image-20210621093420406.png)
+
+### 手动应答
+
+#### 1) 批量应答
+
+**支持批量应答(multiple)并且可以减少网络拥堵:** 开启批量应答的区别
+
+![image-20210621093827258](README.assets/image-20210621093827258.png)
+
+#### 2) 消息自动重新入队
+
+![image-20210621094135959](README.assets/image-20210621094135959.png)
+
+#### 3) 代码编写
+
+1. 重新编写工作线程(消费者)代码
+
+   ```java
+   public class MessageAnswerWorker {
+   
+       // 定义队列名
+       private static final String QUEUE_NAME = "hello";
+   
+       public static void main(String[] args) throws IOException, TimeoutException {
+           Channel channel = RabbitmqUtil.getChannel();
+           // 设置第二个参数取消自动应答
+           channel.basicConsume(QUEUE_NAME, false,
+                   (consumerTag, message) -> {
+                       System.out.println(consumerTag + ": 成功接收到消息 - " + new String(message.getBody()));
+                       // 模拟业务处理
+                       try {
+                           Thread.sleep(1000);
+                       } catch (InterruptedException e) {
+                           e.printStackTrace();
+                       }
+                       /*
+                       * basicAck: 手动应答
+                       *   - 第一个参数为消息表示
+                       *   - 第二个参数为是否批量应答
+                       * */
+                       channel.basicAck(message.getEnvelope().getDeliveryTag(), false);
+                   },
+                   (consumerTag) -> System.out.println(consumerTag + ": 接收消息的过程中出现错误")
+           );
+       }
+   }
+   ```
+
+   额外创建一个工作者线程，处理逻辑基本一致，只需要调整线程睡眠时间即可
+
+   ```java
+   Thread.sleep(10000);
+   ```
+
+2. 开启两个工作线程，如果第二个工作线程在处理(睡眠)的过程将其关闭，可以发现第一个工作线程会接收到处理失败的消息
+
+   **避免了消息丢失**
+
+   ![image-20210621101027438](README.assets/image-20210621101027438.png)
+
+## 3.3 持久化
+
+### 概念
+
+通过消息应答，可以避免由于消费者的问题导致消息丢失。但又如何避免由于 RabbitMQ Server 宕机而导致生产者生产的消息丢失呢? -> **将队列和消息进行持久化**
+
+### 队列持久化
+
+> RabbitMQ 不支持通过 API 修改原队列，所以要先删除对应的队列
+
+1. 在 RabbitMQ 的后台管理中删除测试队列
+
+   ![image-20210621102204558](README.assets/image-20210621102204558.png)
+
+2. 修改任一生产者代码中的队列配置
+
+   ```java
+   // 第二个参数表示开启队列的持久化
+   channel.queueDeclare(QUEUE_NAME, true, false, false, null);
+   ```
+
+3. 重启 RabbitMQ Server 查看队列
+
+   ![image-20210621102822549](README.assets/image-20210621102822549.png)
+
+### 消息持久化
+
+1. 添加任一生产者代码在发送消息时的配置
+
+   ```java
+   // 第二个参数设置为 MessageProperties.PERSISTENT_TEXT_PLAIN 标识该消息需要持久化到磁盘上
+   channel.basicPublish("", QUEUE_NAME, MessageProperties.PERSISTENT_TEXT_PLAIN, message.getBytes());
+   ```
+
+2. 重启 MQ Server 查看队列中的消息
+
+   ![image-20210621103718423](README.assets/image-20210621103718423.png)
+
+   注意：这里的持久化方式，依然可能导致数据丢失(数据在准备写入时宕机)，但概率较低
+
+### 不公平分发 - 能者多劳
+
+1. 修改带有线程睡眠的工作线程代码，配置不公平分发
+
+   ```java
+   // 设置不公平分发，默认是 0 (轮询分发)
+   channel.basicQos(1);
+   ```
+
+2. 启动测试，生产 4 条消息
+
+   ![image-20210621110050759](README.assets/image-20210621110050759.png)
+
+   其原理是通过设置 qos ，表示消费者每次最多只接收 n 条消息进行处理，只有将消息处理结束，手动应答之后，下一条消息才会被分发进来。
+
+### 预取值
+
+一个消费者连接的 Channel 是存在一个 **未确认的消息缓冲区**，可以通过**设置预取值限制缓冲区的大小**，避免缓存区中**存在太多未确认的消息**，直到有消息被确认 MQ Server 才会再发送消息到该 Channel
+
+通常增加预取值将提高消费者传递消息的速度，可以在消费者中设置 `qos` 设置预取值
+
+# 第四章 发布确认 
+
+## 4.1 概念
+
+生产者可以将 Channel 设置成 confirm 模式，此时所有在该 Channel 上发布的消息都会被指派一个唯一的 ID(从 1 开始)，当消息被投递到所有匹配的队列之后，Broker 就会发送一个确认信息给生产者(包含消息的唯一 ID)
+
+如果消息和队列都是**可持久化**的，那么确认消息就会在消息写入磁盘后发出，回传的确认消息中的 delivery-tag 域包含了确认消息的序列号
+
+confirm 是异步的，发布消息后，生产者可以在等待返回确认的同时继续发送下一条消息，当消息确认后，便通过回调方法来处理该确认信息。如果 Broker 因为自身原因导致消息丢失，就会发送一条 nack 消息，生产者可以在回调方法中处理该消息
+
+![image-20210621133657028](README.assets/image-20210621133657028.png)
+
+## 4.1 确认
+
+### 单个确认发布
+
+一种简单的确认方式，同时也是一种**同步确认发布**(生产者必须等待它被确认发布才可以)的方式
+
+缺点：**发布速度特别慢**
+
+### 批量确认发布
+
+### 异步确认发布
