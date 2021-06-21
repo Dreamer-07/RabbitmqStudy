@@ -547,6 +547,8 @@ Message queue，从字面上来看，本质上就是个队列，遵循**先入�
 
 # 第四章 发布确认 
 
+> 队列持久化 + 消息持久化 + 发布确认 => 保证消息的安全性
+
 ## 4.1 概念
 
 生产者可以将 Channel 设置成 confirm 模式，此时所有在该 Channel 上发布的消息都会被指派一个唯一的 ID(从 1 开始)，当消息被投递到所有匹配的队列之后，Broker 就会发送一个确认信息给生产者(包含消息的唯一 ID)
@@ -565,6 +567,212 @@ confirm 是异步的，发布消息后，生产者可以在等待返回确认的
 
 缺点：**发布速度特别慢**
 
+```java
+/**
+ * @program: RabbitmqStudy
+ * @description: 测试单个发布确认 - 672
+ * @author: EMTKnight
+ * @create: 2021-06-21
+ **/
+
+public class SingleProducer {
+
+    public static void main(String[] args) throws IOException, TimeoutException, InterruptedException {
+        // 随机创建一个队列名
+        String queueName = UUID.randomUUID().toString();
+        // 获取通信
+        Channel channel = RabbitmqUtil.getChannel();
+        // 配置队列
+        channel.queueDeclare(queueName, false, false, false , null);
+        // 开启发布确认
+        channel.confirmSelect();
+        // 获取开始时间
+        long start = System.currentTimeMillis();
+        for (int i = 0; i < 1000; i++) {
+            // 发布消息
+            channel.basicPublish("", queueName, null, ("消息" + i).getBytes());
+            // 等待发布确认
+            boolean flag = channel.waitForConfirms();
+            if (flag) {
+                System.out.println("消息" + i + ": 成功发送");
+            }
+        }
+        // 获取结束时间
+        long end = System.currentTimeMillis();
+        System.out.println("使用单个确认发布发送 1000 个消息，耗时:" + (end - start));
+    }
+
+}
+```
+
 ### 批量确认发布
 
+可以先发布一批消息后再一起确认，这样可以提高系统的吞吐量
+
+缺点：
+
+1. 如果出现异常，很难找出其中是哪一个出现异常，需要将整个批处理保存在内存中，以记录重要的信息而后重新发布消息
+2. 这种方案也是同步的
+
+```java
+/**
+ * @program: RabbitmqStudy
+ * @description: 批量确认发布 - 109
+ * @author: EMTKnight
+ * @create: 2021-06-21
+ **/
+
+public class BatchProducer {
+
+    public static void main(String[] args) throws IOException, TimeoutException, InterruptedException {
+        // 随机创建一个队列名
+        String queueName = UUID.randomUUID().toString();
+        // 获取通信
+        Channel channel = RabbitmqUtil.getChannel();
+        // 配置队列
+        channel.queueDeclare(queueName, false, false, false , null);
+        // 开启发布确认
+        channel.confirmSelect();
+        // 获取开始时间
+        long start = System.currentTimeMillis();
+
+        for (int i = 1; i <= 1000; i++) {
+            // 发布消息
+            channel.basicPublish("", queueName, null, ("消息" + i).getBytes());
+            // 发布确认
+            if (i % 100 == 0) {
+                boolean flag = channel.waitForConfirms();
+                if (flag) {
+                    System.out.println("批量发布确认成功");
+                } else {
+                    System.out.println("批量发布确认失败");
+                }
+            }
+        }
+
+        // 获取结束时间
+        long end = System.currentTimeMillis();
+        System.out.println("使用批量确认发布发送 1000 个消息，耗时:" + (end - start));
+    }
+
+}
+```
+
 ### 异步确认发布
+
+利用**回调函数**来达到消息可靠性传递，可靠性和效率都比前两种高  
+
+缺点：编程逻辑复杂
+
+![image-20210621142522254](README.assets/image-20210621142522254.png)
+
+```java
+/**
+ * @program: RabbitmqStudy
+ * @description: 异步发布确认 - 43
+ * @author: EMTKnight
+ * @create: 2021-06-21
+ **/
+
+public class AsyncProducer {
+
+    public static void main(String[] args) throws IOException, TimeoutException {
+        // 随机创建一个队列名
+        String queueName = UUID.randomUUID().toString();
+        // 获取通信
+        Channel channel = RabbitmqUtil.getChannel();
+        // 配置队列
+        channel.queueDeclare(queueName, false, false, false , null);
+        // 开启发布确认
+        channel.confirmSelect();
+        // 获取开始时间
+        long start = System.currentTimeMillis();
+
+        /*
+        * 添加异步确认发布回调函数
+        *   第一个参数为成功发布的回调函数
+        *   第二个参数为发布失败的回调函数
+        *   * 两个参数为同一个函数式接口的实现类
+        *       - 第一个参数是消息的序列号(标识)
+        *       - 第二个参数是消息是否为批量确认
+        * */
+        channel.addConfirmListener(
+            (deliveryTag, nackCallback) -> System.out.println(deliveryTag + "消息发布确认成功"),
+            (deliveryTag, nackCallback) -> System.out.println(deliveryTag + "消息发布确认失败")
+        );
+
+        for (int i = 1; i <= 1000; i++) {
+            // 发布消息
+            channel.basicPublish("", queueName, null, ("消息" + i).getBytes());
+        }
+
+        // 获取结束时间
+        long end = System.currentTimeMillis();
+        System.out.println("使用异步确认发布发送 1000 个消息，耗时:" + (end - start));
+    }
+
+}
+```
+
+### 处理异步未发送消息
+
+可以将为确认的消息放在一个**同步容器**中(ConcurrentSkipListMap)，key 值保存对应的消息表示，value 保存对应的消息体
+
+这个集合负责在 confirm cllback 和发布线程中工作
+
+```java
+public static void main(String[] args) throws IOException, TimeoutException {
+    // 创建同步容器
+    ConcurrentSkipListMap<Long, String> dataMap = new ConcurrentSkipListMap<>();
+    ...
+
+    /*
+    * 添加异步确认发布回调函数
+    *   第一个参数为成功发布的回调函数
+    *   第二个参数为发布失败的回调函数
+    *   * 两个参数为同一个函数式接口的实现类
+    *       - 第一个参数是消息的序列号(标识)
+    *       - 第二个参数是消息是否为批量确认
+        * */
+    channel.addConfirmListener(
+        (deliveryTag, multiple) -> {
+            // 判断是否为批量确认
+            if (multiple) {
+                dataMap.headMap(deliveryTag).clear();
+            } else {
+                // 从容器中删除对应的消息
+                dataMap.headMap(deliveryTag);
+            }
+            System.out.println(deliveryTag + "消息发布确认成功");
+        },
+        (deliveryTag, multiple) -> {
+            String message = dataMap.get(deliveryTag);
+            System.out.println(deliveryTag + "消息发布确认失败, 具体的消息体为:" + message);
+        }
+    );
+
+    for (int i = 1; i <= 1000; i++) {
+        // 发布消息
+        channel.basicPublish("", queueName, null, ("消息" + i).getBytes());
+        // 将消息和对应的序列号保存到容器中
+        dataMap.put(channel.getNextPublishSeqNo(), ("消息" + i));
+    }
+
+    ...
+}
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
