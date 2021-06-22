@@ -13,6 +13,7 @@
         <module>02-work-queue</module>
         <module>03-pub-confirm</module>
         <module>04-exchange</module>
+        <module>05-dead-letter</module>
     </modules>
 
 

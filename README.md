@@ -1104,11 +1104,220 @@ fanout 模式并不支持灵活的操作，只能进行无意识的广播，而 
 
 3. 启动，输入对应的 routing 和 message 后查看对应消费者的控制台
 
+# 第六章 死信队列
 
+## 6.1 概念
 
+一般来说，`producer` 将消息投递到 broker / queue 中，consumer 从队列中取出消息进行消费，但某些时候由于特定的原因**导致 queue 中的某些消息无法被消费**，这样的消息如果没有后续处理，就变成了死信，所以自然就有了死信队列
 
+应用场景：
 
+1. 为了保证订单业务的消息不会丢失，当订单信息发生异常时，将消息投入到死信队列中，防止消息消逝
+2. 用户在下单后未能在一定时间内支付时自动失效 
 
+## 6.2 来源
+
+1. 消息 TTL(存活时间) 过期
+2. 队列达到了最大长度(队列满了，无法再添加数据到 mq 中)
+3. 消息被拒绝并且不能返回队列中
+
+## 6.3 实战
+
+### 代码架构图
+
+![image-20210622134724192](README.assets/image-20210622134724192.png)
+
+### 编码 - TTL 过期
+
+> 关于队列的一些额外配置，可以参考: https://my.oschina.net/LucasZhu/blog/1838169
+
+1. 编写消息消费者和死信消息消费者
+
+   ```java
+   /**
+    * @program: RabbitmqStudy
+    * @description: 死信消息消费者
+    * @author: EMTKnight
+    * @create: 2021-06-22
+    **/
+   
+   public class DeadLetterMessageConsumer {
+   
+       private final static String DEAD_LETTER_EXCHANGE_NAME = "dead_exchange";
+       private final static String DEAD_QUEUE = "dead-queue";
+       private static Channel channel;
+   
+       static {
+           // 获取信道
+           try {
+               channel = RabbitmqUtil.getChannel();
+               // 声明交换机
+               channel.exchangeDeclare(DEAD_LETTER_EXCHANGE_NAME, BuiltinExchangeType.DIRECT);
+               // 声明队列
+               channel.queueDeclare(DEAD_QUEUE, false, false, false, null);
+               // 绑定队列和交换机
+               channel.queueBind(DEAD_QUEUE, DEAD_LETTER_EXCHANGE_NAME, "dead.letter");
+           } catch (IOException | TimeoutException e) {
+               e.printStackTrace();
+           }
+       }
+   
+       public static void main(String[] args) throws IOException {
+           System.out.println("等待死信消息.....");
+           channel.basicConsume(DEAD_QUEUE, true,
+                   (tag, message) -> System.out.println(DEAD_QUEUE + "处理死信消息:" + new String(message.getBody())),
+                   (message) -> {}
+           );
+       }
+   }
+   
+   ```
+
+   消息消费者
+
+   ```java
+   /**
+    * @program: RabbitmqStudy
+    * @description: 消息消费者
+    * @author: EMTKnight
+    * @create: 2021-06-22
+    **/
+   
+   public class MessageConsumer {
+   
+       private final static String DEAD_LETTER_EXCHANGE_NAME = "dead_exchange";
+   
+       private final static String NORMAL_EXCHANGE_NAME = "normal_exchange";
+       private final static String NORMAL_QUEUE_NAME = "normal_queue";
+       private static Channel channel;
+   
+       static {
+           // 获取通信
+           try {
+               channel = RabbitmqUtil.getChannel();
+               // 配置交换机
+               channel.exchangeDeclare(NORMAL_EXCHANGE_NAME, BuiltinExchangeType.DIRECT);
+               // 配置队列
+               channel.queueDeclare(NORMAL_QUEUE_NAME, false, false, false, new HashMap<String,Object>(){{
+                   // 配置队列参数
+                   // 1. 配置死信交换机
+                   put("x-dead-letter-exchange", DEAD_LETTER_EXCHANGE_NAME);
+                   // 2. 配置死信交换队列的路由 key
+                   put("x-dead-letter-routing-key", "dead.letter");
+                   // 3. [可选] 配置消息 TTL(存活时间，也可以由客户端指定) ms
+   //            put("x-message-ttl", 10000);
+               }});
+               // 绑定队列和交换机
+               channel.queueBind(NORMAL_QUEUE_NAME, NORMAL_EXCHANGE_NAME, "normal.queue");
+           } catch (IOException | TimeoutException e) {
+               e.printStackTrace();
+           }
+       }
+   
+       public static void main(String[] args) throws IOException {
+           System.out.println("等待消息....");
+           channel.basicConsume(NORMAL_QUEUE_NAME, true,
+                   (tag, message) -> System.out.println(NORMAL_QUEUE_NAME + "处理消息:" + new String(message.getBody())),
+                   (message) -> {}
+           );
+       }
+   }
+   ```
+
+2. 编写生产者代码
+
+   ```java
+   /**
+    * @program: RabbitmqStudy
+    * @description: 消息生产者
+    * @author: EMTKnight
+    * @create: 2021-06-22
+    **/
+   
+   public class MessageProducer {
+   
+       private final static String NORMAL_EXCHANGE_NAME = "normal_exchange";
+   
+       public static void main(String[] args) throws IOException, TimeoutException {
+           // 获取通信
+           Channel channel = RabbitmqUtil.getChannel();
+           for (int i = 0; i < 10; i++) {
+               String message = i + "";
+               // 向交换机中发送消息
+               channel.basicPublish(NORMAL_EXCHANGE_NAME, "",
+                       // 对消息的过期时间进行配置(单位: ms)
+                       new AMQP.BasicProperties().builder().expiration("10000").build(),
+                       message.getBytes()
+               );
+           }
+   
+       }
+   
+   }
+   ```
+
+3. 启动消息生产者前，关闭消费者，查看 Queue 的状况
+
+   ![image-20210622144144894](README.assets/image-20210622144144894.png)
+
+   等待 10 秒钟, 可以发现由于消息超时都被转发到了死信队列中
+
+   ![image-20210622144310382](README.assets/image-20210622144310382.png)
+
+4. 开启死信消费者，查看控制台打印
+
+### 队列达到最大长度
+
+1. 为了正常模拟，应该删除原队列，同时注释掉 TTL 参数的配置
+
+2. 修改 `normal_queue` 队列的配置，限制队列内消息最大数量
+
+   ```java
+   // 配置队列
+   channel.queueDeclare(NORMAL_QUEUE_NAME, false, false, false, new HashMap<String,Object>(){{
+       ...
+       // 4. [模拟队列达到最大长度] 配置队列内消息最大个数
+       put("x-max-length",6);
+   }});
+   ```
+
+3. 重启，测试(为了模拟消费者启动后即可关闭)
+
+4. 查看 RabbitMQ 后台管理
+
+   ![image-20210622145707557](README.assets/image-20210622145707557.png)
+
+### 拒绝处理
+
+1. 为了正常模拟，应该删除原队列，同时注释掉 TTL 参数和队列最大长度的配置
+
+2. 修改 `normal_queue` 队列的配置
+
+   ```java
+   // 测试拒绝处理指定消息并且不重新加入到消息队列中, 关闭自动应答
+   channel.basicConsume(NORMAL_QUEUE_NAME, false,
+   	(tag, message) -> {
+           String msg = new String(message.getBody());
+           // 判断字符串
+           if ("5".equals(msg)) {
+               System.out.println(NORMAL_QUEUE_NAME + "拒绝处理消息:" + new String(message.getBody()));
+               // 拒绝处理消息，第二个参数设置为 false 表示不重新返回消息队列中(但可以被转发到死信队列中)
+               channel.basicReject(message.getEnvelope().getDeliveryTag(), false);
+           } else {
+               System.out.println(NORMAL_QUEUE_NAME + "处理消息:" + new String(message.getBody()));
+               // 手动应答
+               channel.basicAck(message.getEnvelope().getDeliveryTag(), false);
+           }
+       },
+   	(message) -> {}
+   );
+   ```
+
+   注意需要设置手动应答
+
+3. 重启，测试，查看控制台打印
+
+   ![image-20210622152030481](README.assets/image-20210622152030481.png)
 
 
 
