@@ -733,7 +733,7 @@ public static void main(String[] args) throws IOException, TimeoutException {
     *   * 两个参数为同一个函数式接口的实现类
     *       - 第一个参数是消息的序列号(标识)
     *       - 第二个参数是消息是否为批量确认
-        * */
+    * */
     channel.addConfirmListener(
         (deliveryTag, multiple) -> {
             // 判断是否为批量确认
@@ -762,11 +762,347 @@ public static void main(String[] args) throws IOException, TimeoutException {
 }
 ```
 
+# 第五章 交换机
 
+用于实现**订阅/发布模式**:
 
+![image-20210621155651936](README.assets/image-20210621155651936.png)
 
+## 5.1 Exchange
 
+### 概念
 
+RabbitMQ 消息传递模型的核心就是：**生产者生产的消息从不会直接发送到队列上**，而是发送消息到交换机中
+
+交换机负责从生产者中接收消息，再根据相应的规则(放在特定队列/广播/丢弃等)推入到对应的队列中
+
+![image-20210621160102589](README.assets/image-20210621160102589.png)
+
+### 类型
+
+- 直接(路由类型)
+- 主题
+- 扇出(发布/订阅类型)
+- ~~标题~~(不常用)
+- 无名(默认)
+
+## 5.2 临时队列 - 自动删除队列
+
+当对应的所有消费者都断开连接后，该队列就会自动删除
+
+```java
+channel.queueDeclard.getQueue(); //获取临时队列
+```
+
+## 5.3 绑定
+
+负责维护 exchange 和 queue 之间的桥梁，由其来决定 exchange 与哪些 queue 进行了绑定
+
+![image-20210621161147874](README.assets/image-20210621161147874.png)
+
+## 5.4 Fanout - 扇出(发布/订阅)
+
+### 简介
+
+可以将接受到的所有消息**广播**到所有关联的队列中，在该模式中队列和交换机的 routingKey 应该都是一样的
+
+### 实战
+
+![image-20210621161429040](README.assets/image-20210621161429040.png)
+
+1. 编写消费者，多线程开启
+
+   ```java
+   /**
+    * @program: RabbitmqStudy
+    * @description: 基于 fanout 交换机模式的消费者
+    * @author: EMTKnight
+    * @create: 2021-06-21
+    **/
+   
+   public class FanoutExchangeConsumer {
+   
+       private final static String FANOUT_EXCHANGE_NAME = "logs";
+   
+       public static void main(String[] args) throws IOException, TimeoutException {
+           // 获取连接
+           Channel channel = RabbitmqUtil.getChannel();
+           // 声明交换机
+           channel.exchangeDeclare(FANOUT_EXCHANGE_NAME, BuiltinExchangeType.FANOUT);
+           // 声明临时队列
+           String queueName = channel.queueDeclare().getQueue();
+           /* 将交换机和路由进行绑定
+           *   - 第一个参数为队列名
+           *   - 第二个参数为交换机名
+           *   - 第三个参数为维护关系的路由 key
+           * */
+           channel.queueBind(queueName, FANOUT_EXCHANGE_NAME, "");
+           System.out.println("正在等待新消息的到来....");
+   
+           // 接收消息
+           channel.basicConsume(queueName, true,
+               (consumerTag, message) -> System.out.println("成功接收到消息:" + new String(message.getBody())),
+               (consumerTag) -> System.out.println("没有成功接收到消息:" + consumerTag)
+           );
+       }
+   
+   }
+   ```
+
+2. 编写生产者，负责发布消息
+
+   ```java
+   public class FanoutExchangeProducer {
+   
+       private final static String FANOUT_EXCHANGE_NAME = "logs";
+   
+       public static void main(String[] args) throws IOException, TimeoutException {
+           // 获取通信
+           Channel channel = RabbitmqUtil.getChannel();
+   
+           Scanner scanner = new Scanner(System.in);
+           while (scanner.hasNext()) {
+               String message = scanner.next();
+               // 通过交换机'发布'消息
+               channel.basicPublish(FANOUT_EXCHANGE_NAME, "", null, message.getBytes());
+               System.out.println("成功发布消息:" + message);
+           }
+   
+       }
+   
+   }
+   ```
+
+3. 启动，实现 **发布/订阅**(生产者发布一条消息，所有相关队列的消费者接受到该消息)
+
+## 5.5 Direct - 路由模式
+
+### 简介
+
+fanout 模式并不支持灵活的操作，只能进行无意识的广播，而 direct 模式支持将消息传递给指定 routingKey 的队列中
+
+如果发布消息的 routingKey 并不存在该交换机中，该**消息就会被丢弃**
+
+![image-20210621164834369](README.assets/image-20210621164834369.png)
+
+### 多重绑定
+
+![image-20210621165033176](README.assets/image-20210621165033176.png)
+
+在 direct 类型的交换机中，允许使用相同的 routingKey 绑定多个队列，就和 fanout 差不多	
+
+### 实战
+
+![image-20210621165213050](README.assets/image-20210621165213050.png)
+
+1. 创建针对两个队列的消费者
+
+   ```java
+   /**
+    * @program: RabbitmqStudy
+    * @description: 基于 direct 交换机模式 console 队列的消费者
+    * @author: EMTKnight
+    * @create: 2021-06-21
+    **/
+   
+   public class ConsoleQueueConsumer {
+   
+       private final static String DIRECT_EXCHANGE_NAME = "direct_logs";
+   
+       public static void main(String[] args) throws IOException, TimeoutException {
+           // 获取通信
+           Channel channel = RabbitmqUtil.getChannel();
+           // 配置交换机
+           channel.exchangeDeclare(DIRECT_EXCHANGE_NAME, BuiltinExchangeType.DIRECT);
+           // 配置队列
+           channel.queueDeclare("console", false, false, false, null);
+           // 绑定队列和交换机
+           channel.queueBind("console", DIRECT_EXCHANGE_NAME, "info");
+           channel.queueBind("console", DIRECT_EXCHANGE_NAME, "warning");
+           System.out.println("正在等待新消息的到来....");
+   
+           // 接收消息
+           channel.basicConsume("console", true,
+                   (consumerTag, message) -> System.out.println("console --> 成功接收到消息:" + new String(message.getBody())),
+                   (consumerTag) -> System.out.println("console --> 没有成功接收到消息:" + consumerTag)
+           );
+       }
+   
+   }
+   ```
+   
+   ```java
+   /**
+    * @program: RabbitmqStudy
+    * @description: 基于 direct 交换机模式 disk 队列的消费者
+    * @author: EMTKnight
+    * @create: 2021-06-21
+    **/
+   
+   public class DiskQueueConsumer {
+   
+       private final static String DIRECT_EXCHANGE_NAME = "direct_logs";
+   
+       public static void main(String[] args) throws IOException, TimeoutException {
+           // 获取通信
+           Channel channel = RabbitmqUtil.getChannel();
+           // 配置队列
+           channel.queueDeclare("disk", false, false, false, null);
+           // 绑定队列和交换机
+           channel.queueBind("disk", DIRECT_EXCHANGE_NAME, "error");
+           System.out.println("正在等待新消息的到来....");
+   
+           // 接收消息
+           channel.basicConsume("disk", true,
+                   (consumerTag, message) -> System.out.println("disk --> 成功接收到消息:" + new String(message.getBody())),
+                   (consumerTag) -> System.out.println("disk --> 没有成功接收到消息:" + consumerTag)
+           );
+       }
+   
+   }
+   ```
+   
+2. 创建一个消息生产者
+
+   ```java
+   public class MessageProducer {
+   
+       private final static String DIRECT_EXCHANGE_NAME = "direct_logs";
+   
+       public static void main(String[] args) throws IOException, TimeoutException {
+           // 获取通信
+           Channel channel = RabbitmqUtil.getChannel();
+   
+           Scanner sc = new Scanner(System.in);
+           System.out.println("输入要发送队列的 routingKey(info/warning/error)");
+           // 获取要发送队列的 routingKey
+           String routingKey = sc.next();
+           while (sc.hasNext()) {
+               String message = sc.next();
+               channel.basicPublish(DIRECT_EXCHANGE_NAME, routingKey, null, message.getBytes());
+               System.out.println("成功发送消息:" + message);
+           }
+       }
+   }
+   ```
+
+3. 启动，输入对应的 routingKey 和 message，并查看对应消费者的控制台(消息只会发送给对应 routingKey 的队列)
+
+## 5.6 Topic - 交换机模式
+
+### 概念
+
+和 Direct 模式原理相同，都是根据路由匹配队列，但比其更加强大的是 **支持 routingKey 的模糊匹配**
+
+![image-20210622105805471](README.assets/image-20210622105805471.png)
+
+> \* 表示任意一个单词，\# 表示零个/多个单词
+
+如果队列的路由键为 #，那么这个队列就能接收所有数据，类似于 **fanout** 模式
+
+如果队列的路由键不包含 #/*, 就类似于 **direct** 模式
+
+### 实战
+
+1. 创建两个消费者
+
+   ```java
+   /**
+    * @program: RabbitmqStudy
+    * @description: 基于 topic 交换机模式的 Q1 队列的消费者
+    * @author: EMTKnight
+    * @create: 2021-06-22
+    **/
+   
+   public class Q1Consumer {
+   
+       private final static String TOPIC_EXCHANGE_NAME = "topic_logs";
+   
+       public static void main(String[] args) throws IOException, TimeoutException {
+           // 获取通信
+           Channel channel = RabbitmqUtil.getChannel();
+           // 配置交换机
+           channel.exchangeDeclare(TOPIC_EXCHANGE_NAME, BuiltinExchangeType.TOPIC, false, false, null);
+           // 配置队列
+           channel.queueDeclare("Q1", false, false, false, null);
+           // 绑定队列和交换机
+           channel.queueBind("Q1", TOPIC_EXCHANGE_NAME, "*.orange.*");
+           // 等待接收消息
+           channel.basicConsume("Q1", true,
+                   (consumerTag, message) -> {
+                       System.out.println("Q1 队列中获取信息: " + message + "，对应的 routingKey 为:" + message.getEnvelope().getRoutingKey());
+                   },
+                   (consumerTag) -> System.out.println("console --> 没有成功接收到消息:" + consumerTag)
+           );
+       }
+   
+   }
+   ```
+
+   ```java
+   /**
+    * @program: RabbitmqStudy
+    * @description: 基于 topic 交换机模式的 Q2 队列的消费者
+    * @author: EMTKnight
+    * @create: 2021-06-22
+    **/
+   
+   public class Q2Consumer {
+   
+       private final static String TOPIC_EXCHANGE_NAME = "topic_logs";
+   
+       public static void main(String[] args) throws IOException, TimeoutException {
+           // 获取通信
+           Channel channel = RabbitmqUtil.getChannel();
+           // 配置队列
+           channel.queueDeclare("Q2", false, false, false, null);
+           // 绑定队列和交换机
+           channel.queueBind("Q2", TOPIC_EXCHANGE_NAME, "*.*.rabbit");
+           channel.queueBind("Q2", TOPIC_EXCHANGE_NAME, "lazy.#");
+           // 等待接收消息
+           channel.basicConsume("Q1", true,
+                   (consumerTag, message) -> {
+                       System.out.println("Q2 队列中获取信息: " + message + "，对应的 routingKey 为:" + message.getEnvelope().getRoutingKey());
+                   },
+                   (consumerTag) -> System.out.println("console --> 没有成功接收到消息:" + consumerTag)
+           );
+       }
+   
+   }
+   ```
+
+2. 创建生产者
+
+   ```java
+   /**
+    * @program: RabbitmqStudy
+    * @description: 消息生产者
+    * @author: EMTKnight
+    * @create: 2021-06-22
+    **/
+   
+   public class MessageProducer {
+   
+       private final static String TOPIC_EXCHANGE_NAME = "topic_logs";
+   
+       public static void main(String[] args) throws IOException, TimeoutException {
+           // 获取通信
+           Channel channel = RabbitmqUtil.getChannel();
+           Scanner scanner = new Scanner(System.in);
+           while (true) {
+               System.out.print("请输入要发送消息队列的 routingKey:");
+               String routingKey = scanner.next();
+               System.out.print("请输入要发送的消息体:");
+               String message = scanner.next();
+               channel.basicPublish(TOPIC_EXCHANGE_NAME, routingKey, null, message.getBytes());
+               System.out.println("成功发送消息:" + message + ", 使用的 routingKey:" + routingKey);
+           }
+       }
+   
+   }
+   ```
+
+3. 启动，输入对应的 routing 和 message 后查看对应消费者的控制台
 
 
 
