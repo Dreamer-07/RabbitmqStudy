@@ -1876,3 +1876,338 @@ http://localhost:8080/msg/send/delay/tomoetyann/2000
 查看控制台
 
 ![image-20210623111253300](README.assets/image-20210623111253300.png)
+
+## 7.7 总结
+
+![image-20210623115611338](README.assets/image-20210623115611338.png)
+
+# 第八章 发布确认高级
+
+> 防止生产者向 MQ Server 发送消息时，如果没有对应的交换机/队列，那么应该将未能发送成功的消息加入缓存再进行处理
+
+## 8.1 优化交换机
+
+1. 新建模块 `07-pub-confirm-adv`
+
+2. 修改 POM，导入需要的依赖
+
+   ```xml
+   <!--RabbitMQ 依赖-->
+   <dependency>
+       <groupId>org.springframework.boot</groupId>
+       <artifactId>spring-boot-starter-amqp</artifactId>
+   </dependency>
+   <dependency>
+       <groupId>org.springframework.boot</groupId>
+       <artifactId>spring-boot-starter-web</artifactId>
+   </dependency>
+   <dependency>
+       <groupId>org.springframework.boot</groupId>
+       <artifactId>spring-boot-starter-test</artifactId>
+       <scope>test</scope>
+   </dependency>
+   <dependency>
+       <groupId>com.alibaba</groupId>
+       <artifactId>fastjson</artifactId>
+       <version>1.2.47</version>
+   </dependency>
+   <dependency>
+       <groupId>org.projectlombok</groupId>
+       <artifactId>lombok</artifactId>
+   </dependency>
+   <!-- 添加 Swagger 依赖 -->
+   <dependency>
+       <groupId>io.springfox</groupId>
+       <artifactId>springfox-boot-starter</artifactId>
+       <version>3.0.0</version>
+   </dependency>
+   <!--RabbitMQ 测试依赖-->
+   <dependency>
+       <groupId>org.springframework.amqp</groupId>
+       <artifactId>spring-rabbit-test</artifactId>
+       <scope>test</scope>
+   </dependency>
+   ```
+
+3. 创建 `application.properties` 添加 Rabbit 相关的配置
+
+   ```properties
+   # 配置 Rabbit MQ 的连接
+   spring.rabbitmq.addresses=192.168.127.139
+   spring.rabbitmq.port=5672
+   spring.rabbitmq.username=prover
+   spring.rabbitmq.password=123456
+   # 开启生产者发布确认(默认是 none 不开启发布确认，correlated 表示发布消息成功到交换器后会触发回调方法， SIMPLE 类似于单步发布确认回调)
+   spring.rabbitmq.publisher-confirm-type=correlated
+   ```
+
+4. 创建常量类和配置类
+
+   ```java
+   public class RabbitmqConstant {
+   
+       public final static String EXCHANGE_DIRECT_CONFIRM = "confirm.exchange";
+   
+       public final static String QUEUE_CONFIRM = "confirm.queue";
+   
+       public final static String ROUTING_KEY_CONFIRM = "confirm";
+   }
+   ```
+
+   ```java
+   @Configuration
+   public class RabbitmqComponentConfig {
+   
+       @Bean
+       public DirectExchange confirmExchange(){
+           return new DirectExchange(RabbitmqConstant.EXCHANGE_DIRECT_CONFIRM);
+       }
+   
+       @Bean
+       public Queue confirmQueue(){
+           return QueueBuilder.durable(RabbitmqConstant.QUEUE_CONFIRM).build();
+       }
+   
+       @Bean
+       public Binding confirmBinding(){
+           return BindingBuilder.bind(confirmQueue()).to(confirmExchange()).with(RabbitmqConstant.ROUTING_KEY_CONFIRM);
+       }
+   }
+   ```
+
+5. **创建回调函数**，当消息发送/未能发送到交换机时，应该进行相关处理
+
+   ```java
+   @Component
+   @Slf4j
+   public class ConfirmCallback implements RabbitTemplate.ConfirmCallback {
+   
+   
+       @Autowired
+       private RabbitTemplate rabbitTemplate;
+   
+       @PostConstruct
+       public void initRabbitTemplate(){
+           // 设置 rabbitTemplate 中发布确认用的回调
+           rabbitTemplate.setConfirmCallback(this);
+       }
+   
+       /**
+        * 回调函数, 无论消息是否到达 exchange 都会触发的回调函数
+        * @param correlationData 保存回调消息的相关信息
+        * @param ack 是否到达 exchange
+        * @param cause 出错的原因
+        */
+       @Override
+       public void confirm(CorrelationData correlationData, boolean ack, String cause) {
+           String id = correlationData != null ? correlationData.getId() : "";
+           if (ack){
+               log.info("id 为 {} 的消息成功被交换机接收" , id);
+           } else {
+               log.error("id 为 {} 的消息没能成功被交换机接收，原因为:{}", id, cause);
+           }
+       }
+   
+   }
+   ```
+
+6. 创建消费者
+
+   ```java
+   @Component
+   @Slf4j
+   public class MessageConsumer {
+   
+       @RabbitListener(queues = RabbitmqConstant.QUEUE_CONFIRM)
+       public void receiveConfirmQueue(Message message){
+           log.info("{} 队列收到消息:{}", RabbitmqConstant.QUEUE_CONFIRM, new String(message.getBody()));
+       }
+   
+   }
+   ```
+
+7. 创建生产者
+
+   ```java
+   @Slf4j
+   @Controller
+   @RequestMapping("/msg")
+   public class MessageController {
+   
+       @Autowired
+       private RabbitTemplate rabbitTemplate;
+   
+   
+       @GetMapping("/send/{message}")
+       public void sendConfirmMsg(@PathVariable String message){
+           // 创建一个 CorrelationData 对象，里面可以配置一些消息的信息用于回调函数时使用
+           CorrelationData correlationData = new CorrelationData("1");
+           rabbitTemplate.convertAndSend(
+               RabbitmqConstant.EXCHANGE_DIRECT_CONFIRM,
+               RabbitmqConstant.ROUTING_KEY_CONFIRM,
+               message, correlationData
+           );
+           log.info("向 {} 队列发送消息:{}", RabbitmqConstant.QUEUE_CONFIRM, message);
+       }
+   
+   }
+   ```
+
+8. 启动，访问 http://localhost:8080/msg/send/byqtxdy
+
+   ![image-20210623152247898](README.assets/image-20210623152247898.png)
+
+9. 修改生产者代码，将交换机名称写错再进行测试
+
+   ![image-20210623152450107](README.assets/image-20210623152450107.png)
+
+   修改生产者代码，保证交换机正确，但路由键错误
+
+   ![image-20210623152621291](README.assets/image-20210623152621291.png)
+
+## 8.2 回退消息
+
+> 针对消息达到交换机，却没能到达队列的情况
+
+### Mandatory 参数
+
+如果仅仅**开启了生产者发布确认机制**的情况下，交换机接收消息后会直接发送消息给生产者回调函数(接受不到也会)，但此时如果指定的路由的队列并不存在或存在其他问题，那么消息就会被==直接丢弃==，而生产者并不知道
+
+而通过设置 `mandatory` 参数可以在消息过程中将不可达到目的的消息回退给生产者
+
+### 编码
+
+1. 在配置文件中添加配置项
+
+   ```properties
+   # 开启回退消息
+   spring.rabbitmq.publisher-returns=true
+   ```
+
+2. 使 **ConfirmCallback** 类额外实现 ==RabbitTemplate.ReturnsCallback== 接口，重写 `returnedMessage(ReturnedMessage returnedMessage)` 方法
+
+   ```java
+   /**
+   * 当消息无法到达队列使，回调消息会调用的函数
+   * @param returnedMessage
+   */
+   @Override
+   public void returnedMessage(ReturnedMessage returnedMessage) {
+       log.error("无法找到交换机 {} 中路由 key 为 {} 的队列，消息为: {}, 错误原因为: {}"
+                 , returnedMessage.getExchange(), returnedMessage.getRoutingKey()
+                 , new String(returnedMessage.getMessage().getBody()), returnedMessage.getReplyText()        
+                );
+   }
+   ```
+
+3. 设置 `rabbitTemplate` 的回退消息处理类
+
+   ```java
+   rabbitTemplate.setReturnsCallback(this);
+   ```
+
+4.  重启，测试
+
+   ![image-20210623154550937](README.assets/image-20210623154550937.png)
+
+## 8.3 备份交换机
+
+### 简介
+
+可以使用 **死信队列** 存储处理失败的消息，而对于 **无法到达路由** 的消息可以则可以使用 **备份交换机**
+
+在声明一个交换机时同时声明它的备份交换机，当该交换机接收到一条 **不可路由** 的消息时，就将消息交给备份交换机处理，由备份交换机来处理消息
+
+如果同时使用了 **回退消息** 和 **备份交换机** 则优先使用 ==备份交换机==
+
+### 代码结构图
+
+![image-20210623155626999](README.assets/image-20210623155626999.png)
+
+### 实战
+
+1. 添加常量 + 组件配置
+
+   ```java
+   public final static String EXCHANGE_FANOUT_BACKUP_CONFIRM = "backup.confirm.exchange";
+   public final static String QUEUE_BACKUP_CONFIRM = "backup.confirm.queue";
+   ```
+
+   ```java
+   @Configuration
+   public class RabbitmqComponentConfig {
+   
+       @Bean
+       public DirectExchange confirmExchange(){
+   //        return new DirectExchange(RabbitmqConstant.EXCHANGE_DIRECT_CONFIRM);
+           return ExchangeBuilder.directExchange(RabbitmqConstant.EXCHANGE_DIRECT_CONFIRM)
+                   // alternate(String exchange) 配置备份交换机
+                   .alternate(RabbitmqConstant.EXCHANGE_FANOUT_BACKUP_CONFIRM).build();
+       }
+   
+       /**
+        * 配置备份交换机
+        * @return
+        */
+       @Bean
+       public FanoutExchange backupConfirmExchange(){
+           return new FanoutExchange(RabbitmqConstant.EXCHANGE_FANOUT_BACKUP_CONFIRM);
+       }
+   
+      
+   
+       /**
+        * 配置备份队列
+        * @return
+        */
+       @Bean
+       public Queue backupConfirmQueue(){
+           return QueueBuilder.durable(RabbitmqConstant.QUEUE_BACKUP_CONFIRM).build();
+       }
+   
+       /**
+        * 配置报警队列
+        * @return
+        */
+       @Bean
+       public Queue warningConfirmQueue(){
+           return QueueBuilder.durable(RabbitmqConstant.QUEUE_WARNING_CONFIRM).build();
+       }
+   
+       /**
+        * 绑定备份队列和交换机
+        * @return
+        */
+       @Bean
+       public Binding backupQueueToExchangeBinding(){
+           return BindingBuilder.bind(backupConfirmQueue()).to(backupConfirmExchange());
+       }
+   
+       /**
+        * 绑定报警队列和交换机
+        * @return
+        */
+       @Bean
+       public Binding warningQueueToExchangeBinding(){
+           return BindingBuilder.bind(warningConfirmQueue()).to(backupConfirmExchange());
+       }
+       
+       ....
+   }
+   ```
+
+2. 编写报警队列的消费者
+
+   ```java
+   @RabbitListener(queues = RabbitmqConstant.QUEUE_WARNING_CONFIRM)
+   public void receiveWarningConfirmQueue(Message message){
+       log.error("{} 报警队列收到消息:{}", RabbitmqConstant.QUEUE_WARNING_CONFIRM, new String(message.getBody()));
+   }
+   ```
+
+3. 通过 RabbitMQ Server 的后台管理，删除原交换机(因为重新配置了)
+
+4. 启动测试
+
+   ![image-20210623162822218](README.assets/image-20210623162822218.png)
+
