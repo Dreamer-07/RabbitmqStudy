@@ -2211,3 +2211,150 @@ http://localhost:8080/msg/send/delay/tomoetyann/2000
 
    ![image-20210623162822218](README.assets/image-20210623162822218.png)
 
+# 第九章 其他知识点
+
+## 9.1 幂等性
+
+### 概念
+
+**用户对应同一操作的一次/多次请求的结果是一致的，不会因为多次点击而产生副作用**，例如：
+
+1. 博客系统同一个用户对同一个文章点赞，即使这人单身30年手速疯狂按点赞，那么实际上也只能给这个文章 +1 赞
+2. 在微信支付的时候，一笔订单应当只能扣一次钱，那么无论是网络问题或者bug等而重新付款，都只应该扣一次钱
+
+### 消息重复消费
+
+消费者在消费mq中的消息时，mq已把消息发送给消费者，消费者在给mq返回ack时网络中断，故mq未收到确认信息，该条消息**会重新**发给其他的消费者，或者在网络重连后再次发送给该消费者，但实际上该消费者已成功消费了该条消息，造成消费者消费了重复的消息；
+
+**解决思路: ** (唯一 ID + 指纹码) / Redis 原子性
+
+### 唯一 ID + 指纹码
+
+![image-20210624090228145](README.assets/image-20210624090228145.png)
+
+### Redis 原子性
+
+利用 Redis 执行 `setnx` 命令，天然具有幂等性，从而实现不重复消息
+
+## 9.2 优先级队列
+
+### 使用场景
+
+**订单催付:** 对应大客户的消息，应该具有更高的优先级，优先让消费者收到
+
+![image-20210624091019236](README.assets/image-20210624091019236.png)
+
+### 实战
+
+1. 配置优先级队列
+
+   ```java
+   @Configuration
+   public class RabbitComponentConfig {
+   
+       public final static String QUEUE_Priority = "pir.queue";
+   
+       @Bean
+       public Queue priQueue(){
+           /*
+           * maxPriority(int num): 指定该队列的最大优先级
+           *   - 允许的最大值是 255，这里指定为 10
+           * */
+           return QueueBuilder.durable(QUEUE_Priority).maxPriority(10).build();
+       }
+   
+   }
+   ```
+
+2. 配置消费者
+
+   ```java
+   @Component
+   @Slf4j
+   public class MessageConsumer {
+       
+       @RabbitListener(queues = RabbitComponentConfig.QUEUE_Priority)
+       public void receivePriQueue(Message message){
+           log.info("优先级队列收到消息:{}, 优先级为: {}",
+                   new String(message.getBody()),
+                   message.getMessageProperties().getPriority()
+           );
+       }
+       
+   }
+   ```
+
+3. 配置生产者
+
+   ```java
+   @Controller
+   @Slf4j
+   @RequestMapping("/msg")
+   public class MessageController {
+   
+       @Autowired
+       private RabbitTemplate rabbitTemplate;
+   
+       @GetMapping("/send/{message}/{priority}")
+       public void sendMsg(@PathVariable String message, @PathVariable Integer priority){
+           rabbitTemplate.convertAndSend("", RabbitComponentConfig.QUEUE_Priority,
+                   message, msg -> {
+                       // 设置消息的优先级
+                       msg.getMessageProperties().setPriority(priority);
+                       return msg;
+                   }
+           );
+           log.info("成功发送消息");
+       }
+   
+   }
+   ```
+
+4. 启动前，先将消费者的 `@Component` 注解注释，保证队列中有两个以上的消息可以排序
+
+   访问 `http://localhost:8080/msg/send/消息体/优先级`  注意优先级设置
+
+5. 取消注释，重启服务器，查看命令行
+
+   ![image-20210624095105626](README.assets/image-20210624095105626.png)
+
+   优先级更高的消息会先被消费
+
+## 9.3 惰性队列
+
+### 概念
+
+惰性队列会尽可能将消息(无论是持久化还是非持久化)存入磁盘中，当消费者需要消费相应消息时才会被加载到内存中
+
+优点在于 **支持更长的队列，可以存储更多消息。** 缺点在于 **速度慢**，且如果存入的是**非持久化**的消息，重启后依然会消息
+
+**适用场景: ** 当消费者因为某些原因宕机，不能正常使用时，就可以
+
+默认情况下，RabbitMQ 接收消息后，队列中的消息会尽可能存储在 **内存** 中，就可以更快的将消息发送给消费者，即使是持久化的消息，在被写入磁盘的同时也会在内存中驻留一份
+
+RabbitMQ 需要释放内存时，会将内存中的消息换页至磁盘中，这个操作会耗费较长时间，也会阻塞队列的操作，==进而无法接受新的消息==
+
+### **配置**
+
+1. 通过 Java API 的方式
+
+   ```java
+   Map<String, Object> args = new HashMap<String, Object>();
+   args.put("x-queue-mode", "lazy");
+   channel.queueDeclare("myqueue", false, false, false, args);
+   ```
+
+2. 通过命令行(Policy)的方式
+
+   ```java
+   rabbitmqctl set_policy Lazy "^myqueue$" '{"queue-mode":"lazy"}' --apply-to queues
+   ```
+
+> 如果一个队列同时使用这两种方式设置的话，那么 Policy 的方式具备更高的优先级。
+>
+> 如果要通过声明的方式改变已有队列的模式的话，那么只能先删除队列，然后再重新声明一个新的
+
+
+
+
+
