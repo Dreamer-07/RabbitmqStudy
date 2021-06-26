@@ -2354,6 +2354,150 @@ RabbitMQ 需要释放内存时，会将内存中的消息换页至磁盘中，�
 >
 > 如果要通过声明的方式改变已有队列的模式的话，那么只能先删除队列，然后再重新声明一个新的
 
+# 第十章 集群
+
+![image-20210624103137717](README.assets/image-20210624103137717.png)
+
+## 10.1 搭建集群
+
+1. 额外创建两台虚拟机，并部署 RabbitMQ
+
+2. 修改主机名(node1, node2, node3) 并重启
+
+   ```shell
+   vim /etc/hostname
+   ```
+
+3. 配置各个节点，让各个节点能够互相识别对方
+
+   ```shell
+   vim /etc/hosts
+   ```
+
+   ```shell
+   192.168.127.139 node1
+   192.168.127.140 node2
+   192.168.127.141 node3
+   ```
+
+4. 在 node1 上执行远程操作命令保证三台节点的 cookie 文件一样
+
+   ```shell
+   scp /var/lib/rabbitmq/.erlang.cookie root@node2:/var/lib/rabbitmq/.erlang.cookie
+   scp /var/lib/rabbitmq/.erlang.cookie root@node3:/var/lib/rabbitmq/.erlang.cookie
+   ```
+
+5. 启动三台虚拟机的 RabbitMQ 和 Erlang 
+
+   ```shell
+   rabbitmq-server -detached
+   ```
+
+6. 在 节点2 和 节点3 执行以下命令，将 RabbitMQ Server 服务加入到集群中
+
+   确保加入节点的虚拟机防火墙要关闭
+
+   ```shell
+   rabbitmqctl stop_app # rabbitmqctl stop 会将 Erlang 虚拟机关闭，rabbitmqctl stop_app 只关闭 RabbitMQ 服务)
+   rabbitmqctl reset
+   rabbitmqctl join_cluster rabbit@node1 # 要加入到哪个节点构建的集群中
+   rabbitmqctl start_app # 只启动应用服务
+   ```
+
+7. 查看集群状态
+
+   ```shell
+   rabbitmqctl cluster_status
+   ```
+
+   ![image-20210624135224446](README.assets/image-20210624135224446.png)
+
+8. 新建用户
+
+   ```shell
+   rabbitmqctl add_user admin 123
+   rabbitmqctl set_user_tags admin administrator
+   rabbitmqctl set_permissions -p "/" admin ".*" ".*" ".*"
+   ```
+
+   访问任意节点的 RabbitMQ 后台
+
+   ![image-20210624135449550](README.assets/image-20210624135449550.png)
+
+9. [可选] 从集群中脱离
+
+   ```shell
+   #node2 机器上执行
+   rabbitmqctl stop_app
+   rabbitmqctl reset
+   rabbitmqctl start_app
+   rabbitmqctl cluster_status
+   
+   #node1 机器上执行
+   rabbitmqctl forget_cluster_node rabbit@node2 
+   ```
+
+## 10.2 镜像队列
+
+### 概念
+
+集群中一个 Broker 节点宕机之后，该节点中的队列和消息都将 **无法使用**，即使恢复了，但如果没有设置持久化，也会导致消息丢失
+
+而引入镜像队列的机制，可以将该**队列镜像(备份)在集群中的其他 Broker** 之上，如果集群中的一个节点失效了，队列能**自动的切换**到备份的另一个节点上以==保证服务的可用性==
+
+### 搭建步骤
+
+1. 在 RabbitMQ Server 后台管理中配置 **策略**
+
+   ![image-20210624142733206](README.assets/image-20210624142733206.png)
+
+   ![image-20210624142656844](README.assets/image-20210624142656844.png)
+
+2. 添加一个新队列
+
+   ![image-20210624143044463](README.assets/image-20210624143044463.png)
+
+3. 关闭 node1 上的 RabbitMQ 服务
+
+4. 查看队列状态，启动消费者访问 RabbitMQ 获取消息
+
+   ![image-20210624143157353](README.assets/image-20210624143157353.png)
+
+   > 注意：此时使用消费者访问时不能访问原 node1 节点，而是要访问 node3 节点
+
+**总结:** 就算整个集群只剩下一台机器了 依然能消费队列里面的消息，说明队列里面的消息被镜像队列传递到相应机器里面了
+
+## 10.3 Nginx 负载均衡
+
+> 注意 Nginx 需要额外编译 Steam 模块
+
+1. 修改 Nginx 配置文件
+
+   ```javascript
+   stream {
+       upstream rabbitmqcluster{
+           server 192.168.127.139:5672;
+           server 192.168.127.140:5672;
+           server 192.168.127.141:5672;
+       }
+       server {
+           listen 8081;
+           proxy_pass rabbitmqcluster;
+       }
+   }
+   ```
+
+2. 修改项目中的连接属性，ip 和 port 为反向代理主机的j即可
+
+   ```properties
+   spring.rabbitmq.addresses=192.168.127.139
+   spring.rabbitmq.port=8081
+   spring.rabbitmq.username=admin
+   spring.rabbitmq.password=123
+   ```
+
+   
+
 
 
 

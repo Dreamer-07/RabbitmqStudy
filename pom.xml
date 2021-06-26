@@ -14,6 +14,7 @@
         <module>03-pub-confirm</module>
         <module>04-exchange</module>
         <module>05-dead-letter</module>
+        <module>10-fedreation</module>
     </modules>
 
 
